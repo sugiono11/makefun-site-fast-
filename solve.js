@@ -34,13 +34,13 @@ function escInto(out, s) {
   }
   let start = 0;
   for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
+    const c = s.charCodeAt(i);
     let rep = null;
-    if (ch === '&') rep = '&amp;';
-    else if (ch === '<') rep = '&lt;';
-    else if (ch === '>') rep = '&gt;';
-    else if (ch === '"') rep = '&quot;';
-    else if (ch === "'") rep = '&#39;';
+    if (c === 38) rep = '&amp;';
+    else if (c === 60) rep = '&lt;';
+    else if (c === 62) rep = '&gt;';
+    else if (c === 34) rep = '&quot;';
+    else if (c === 39) rep = '&#39;';
     if (rep !== null) {
       if (i > start) out.push(s.slice(start, i));
       out.push(rep);
@@ -117,17 +117,20 @@ function isSpaceCode(c) {
     c === 0x202F || c === 0x205F || c === 0x3000 || c === 0xFEFF;
 }
 
-/** The words of a body: its runs of characters other than whitespace. */
-function wordsOf(text) {
+/** The words of a body: its runs of characters other than whitespace.
+ * Counted over the body's lines (a word never spans the '\n' the join would add),
+ * so no joined body string is ever built. */
+function wordsOfLines(lines, start, end) {
   let n = 0;
-  let inWord = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    const sp = (c >= 9 && c <= 13) || c === 32 || c === 0xA0 || c === 0x1680 ||
-      (c >= 0x2000 && c <= 0x200A) || c === 0x2028 || c === 0x2029 ||
-      c === 0x202F || c === 0x205F || c === 0x3000 || c === 0xFEFF;
-    if (sp) inWord = false;
-    else if (!inWord) { inWord = true; n++; }
+  for (let li = start; li < end; li++) {
+    const text = lines[li];
+    let inWord = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      const sp = c < 128 ? c === 32 || (c >= 9 && c <= 13) : isSpaceCode(c);
+      if (sp) inWord = false;
+      else if (!inWord) { inWord = true; n++; }
+    }
   }
   return n;
 }
@@ -304,6 +307,10 @@ function parseFrontMatter(lines) {
 
 /** Trim spaces and tabs at both ends of a line. */
 function trimLine(line) {
+  if (line.length === 0) return line;
+  const a0 = line.charCodeAt(0);
+  const b0 = line.charCodeAt(line.length - 1);
+  if (a0 !== 32 && a0 !== 9 && b0 !== 32 && b0 !== 9) return line;
   let a = 0;
   let b = line.length;
   while (a < b && (line.charCodeAt(a) === 32 || line.charCodeAt(a) === 9)) a++;
@@ -363,9 +370,16 @@ function isHr(line) {
   return true;
 }
 
-/** Whether `line` ends a paragraph: a blank line, a fence, a heading or a break. */
+/** Whether `line` ends a paragraph: a blank line, a fence, a heading or a break.
+ * Dispatched on the first character: only the classifier that can match runs. */
 function endsParagraph(line) {
-  return isBlankLine(line) || fenceLang(line) !== null || headingOf(line) !== null || isHr(line);
+  if (line.length === 0) return true;
+  const c0 = line.charCodeAt(0);
+  if (c0 === 32 || c0 === 9) return isBlankLine(line);
+  if (c0 === 96) return fenceLang(line) !== null;
+  if (c0 === 35) return headingOf(line) !== null;
+  if (c0 === 45 || c0 === 42) return isHr(line);
+  return false;
 }
 
 /** A bullet item's text, or null. */
@@ -401,32 +415,30 @@ function isEscapableCode(c) {
     c === 41 || c === 35 || c === 43 || c === 45 || c === 46 || c === 33 || c === 62;
 }
 
+/** Whether the character at `p` in `s` is escaped: an odd run of backslashes before it, counted from `from` (the reference's scan starts there). */
+function isEscaped(s, p, from) {
+  let n = 0;
+  for (let q = p - 1; q >= from && s.charCodeAt(q) === 92; q--) n++;
+  return (n & 1) === 1;
+}
+
 /** The first index in [from, end) where `s` holds `what` outside a backslash escape, or -1. */
 function findUnescaped(s, what, from, end) {
   const wlen = what.length;
-  for (let j = from; j + wlen <= end; j++) {
-    if (s.charCodeAt(j) === 92 && j + 1 < end && isEscapableCode(s.charCodeAt(j + 1))) {
-      j++;
-      continue;
-    }
-    if (s.startsWith(what, j)) return j;
+  let j = s.indexOf(what, from);
+  while (j !== -1 && j + wlen <= end) {
+    if (!isEscaped(s, j, from)) return j;
+    j = s.indexOf(what, j + 1);
   }
   return -1;
 }
 
 /** The first single * in [from, end) (one whose run is not **), outside an escape, or -1. */
 function findSingleStar(s, from, end) {
-  for (let j = from; j < end; j++) {
-    const c = s.charCodeAt(j);
-    if (c === 92 && j + 1 < end && isEscapableCode(s.charCodeAt(j + 1))) {
-      j++;
-      continue;
-    }
-    if (c !== 42) continue;
-    if (s.charCodeAt(j + 1) === 42) {
-      j++;
-      continue;
-    }
+  let j = s.indexOf('*', from);
+  while (j !== -1 && j < end) {
+    if (isEscaped(s, j, from)) { j = s.indexOf('*', j + 1); continue; }
+    if (s.charCodeAt(j + 1) === 42) { j = s.indexOf('*', j + 2); continue; }
     return j;
   }
   return -1;
@@ -548,8 +560,11 @@ function renderMarkdown(lines, start, end, env) {
   let i = start;
   while (i < end) {
     const line = lines[i];
-    if (isBlankLine(line)) { i++; continue; }
-    const lang = fenceLang(line);
+    // First-character dispatch: a blank line is empty or space/tab-led, a fence
+    // starts with `, a heading with #, a break with - or *, a quote with >.
+    const c0 = line.length === 0 ? -1 : line.charCodeAt(0);
+    if (c0 === -1 || ((c0 === 32 || c0 === 9) && isBlankLine(line))) { i++; continue; }
+    const lang = c0 === 96 ? fenceLang(line) : null;
     if (lang !== null) {
       const body = [];
       i++;
@@ -564,7 +579,7 @@ function renderMarkdown(lines, start, end, env) {
       out.push('</code></pre>\n');
       continue;
     }
-    const hd = headingOf(line);
+    const hd = c0 === 35 ? headingOf(line) : null;
     if (hd !== null) {
       const id = uniqueSlug(slugify(hd.text), ids);
       const parts = [];
@@ -575,12 +590,12 @@ function renderMarkdown(lines, start, end, env) {
       i++;
       continue;
     }
-    if (isHr(line)) {
+    if ((c0 === 45 || c0 === 42) && isHr(line)) {
       out.push('<hr>\n');
       i++;
       continue;
     }
-    if (line.charCodeAt(0) === 62) {
+    if (c0 === 62) {
       const body = [];
       while (i < end && lines[i].charCodeAt(0) === 62) {
         const l = lines[i++];
@@ -802,6 +817,69 @@ function analyzeConst(templates) {
   return isConst;
 }
 
+/**
+ * For each template, the single non-global variable its output can depend on, or
+ * null. A template's output is fixed by (that variable's resolved value, the
+ * build's site/tags/recent, the render depth) when every value it reads, directly
+ * or through includes, is site/tags/recent or that one variable: so an include of
+ * it with the same value at the same depth renders the same text (a card, say,
+ * is the same in every listing that shows it). `loop` disqualifies a template: a
+ * fresh loop object is built per iteration, so its value never repeats. The free
+ * sets are a fixpoint over includes and conservatively over-approximate (a variable
+ * an included template reads but the includer binds still counts), which can only
+ * miss a memoization, never invent one.
+ */
+function analyzeMemo(templates) {
+  const infos = new Map();
+  const walk = (nodes, bound, info) => {
+    for (const n of nodes) {
+      if (n.kind === 'var' || n.kind === 'raw') {
+        if (!bound.has(n.path[0])) info.free.add(n.path[0]);
+      } else if (n.kind === 'if') {
+        if (!bound.has(n.path[0])) info.free.add(n.path[0]);
+        walk(n.then, bound, info);
+        if (n.else !== null) walk(n.else, bound, info);
+      } else if (n.kind === 'for') {
+        if (!bound.has(n.path[0])) info.free.add(n.path[0]);
+        const inner = new Set(bound);
+        inner.add(n.name);
+        inner.add('loop');
+        walk(n.body, inner, info);
+      } else if (n.kind === 'include') {
+        info.includes.push(n.name);
+      }
+    }
+  };
+  for (const [name, nodes] of templates) {
+    const info = { free: new Set(), includes: [] };
+    walk(nodes, new Set(), info);
+    infos.set(name, info);
+  }
+  const free = new Map();
+  for (const [name, info] of infos) free.set(name, new Set(info.free));
+  for (let iter = 0; iter <= templates.size; iter++) {
+    let changed = false;
+    for (const [name, info] of infos) {
+      const f = free.get(name);
+      for (const inc of info.includes) {
+        const g = free.get(inc);
+        if (g === undefined) continue;
+        for (const v of g) {
+          if (!f.has(v)) { f.add(v); changed = true; }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  const memoVar = new Map();
+  for (const [name, f] of free) {
+    if (f.has('loop')) { memoVar.set(name, null); continue; }
+    const nonGlobal = [...f].filter((v) => v !== 'site' && v !== 'tags' && v !== 'recent');
+    memoVar.set(name, nonGlobal.length === 1 ? nonGlobal[0] : null);
+  }
+  return memoVar;
+}
+
 /** The value at `path` in the scope chain: its first name from the nearest scope holding it. */
 function lookup(scope, path) {
   let s = scope;
@@ -813,6 +891,13 @@ function lookup(scope, path) {
     v = v[path[k]];
   }
   return v;
+}
+
+/** The value of the single name `name` in the scope chain (no path array built). */
+function lookupOne(scope, name) {
+  let s = scope;
+  while (s !== null && !Object.hasOwn(s.vars, name)) s = s.parent;
+  return s === null ? undefined : s.vars[name];
 }
 
 /** A value as text: a string itself, a number in JavaScript's digits, true or false, an array's items joined by ", ", else "". */
@@ -876,6 +961,26 @@ function renderNodes(nodes, scope, ctx, depth, out) {
       case 'include': {
         const t = ctx.templates.get(n.name);
         if (t === undefined || depth >= INCLUDE_DEPTH) break;
+        const mv = ctx.memoVar.get(n.name);
+        if (mv != null) {
+          // Single-variable template: its text is fixed by the variable's value
+          // at this depth (see analyzeMemo), so cache it per value and depth.
+          const v = lookupOne(scope, mv);
+          let perVal = ctx.memoCache.get(n.name);
+          if (perVal === undefined) { perVal = new Map(); ctx.memoCache.set(n.name, perVal); }
+          let slots = perVal.get(v);
+          if (slots === undefined) { slots = new Array(9); perVal.set(v, slots); }
+          const d = depth + 1;
+          let cached = slots[d];
+          if (cached === undefined) {
+            const tmp = [];
+            renderNodes(t, scope, ctx, d, tmp);
+            cached = tmp.join('');
+            slots[d] = cached;
+          }
+          out.push(cached);
+          break;
+        }
         if (ctx.isConst.get(n.name) && !shadowsGlobals(scope, ctx.rootScope)) {
           const key = n.name + '\n' + (depth + 1);
           let cached = ctx.constCache.get(key);
@@ -928,6 +1033,7 @@ function build(input) {
     base: input.site.base_url.replace(/\/+$/, ''),
     templates,
     isConst: analyzeConst(templates),
+    memoVar: analyzeMemo(templates),
     constCache: new Map(),
     sources: [],
     statics: [],
@@ -945,7 +1051,7 @@ function build(input) {
     const f = files[fi];
     if (f.path.endsWith('.md')) {
       const text = f.content.indexOf('\r') === -1 ? f.content : f.content.replace(/\r\n?/g, '\n');
-      b.sources.push({ path: f.path, text, lines: null, body: '', bodyStart: 0 });
+      b.sources.push({ path: f.path, text, lines: null, bodyStart: 0 });
     } else b.statics.push({ path: f.path, content: f.content });
   }
 
@@ -962,7 +1068,6 @@ function build(input) {
     s.data = fm.data;
     s.lines = lines;
     s.bodyStart = fm.close + 1;
-    s.body = lines.slice(s.bodyStart).join('\n');
     s.post = s.path.startsWith('posts/');
     let own;
     for (let d = 0; d < RESERVED.length; d++) {
@@ -1099,7 +1204,7 @@ function build(input) {
       date_long: s.data.date === undefined ? '' : longDate(s.data.date),
       summary: s.data.summary ?? '',
       excerpt: s.excerpt,
-      reading_minutes: Math.max(1, Math.ceil(wordsOf(s.body) / 200)),
+      reading_minutes: Math.max(1, Math.ceil(wordsOfLines(s.lines, s.bodyStart, s.lines.length) / 200)),
       tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
     };
   }
@@ -1109,7 +1214,7 @@ function build(input) {
   const allTags = b.tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
   const recent = b.posts.slice(0, b.input.site.recent).map((p) => p.card);
   const rootScope = { vars: { site, tags: allTags, recent }, parent: null };
-  const ctx = { templates: b.templates, isConst: b.isConst, constCache: b.constCache, rootScope };
+  const ctx = { templates: b.templates, isConst: b.isConst, memoVar: b.memoVar, memoCache: new Map(), constCache: b.constCache, rootScope };
   const render = (name, vars) => {
     const nodes = b.templates.get(name);
     if (nodes === undefined) return null;

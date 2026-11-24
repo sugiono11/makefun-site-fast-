@@ -2,6 +2,8 @@
 // array of {id, input}), answers each one alone with run() from solve.js, and writes /output/answers.json: a JSON
 // array of the answers, one per case and in the cases' order. An entry keeps this driver and replaces solve.js with a
 // faster module whose run(input) returns the same answer for every input. Outside a container MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in for /input and /output.
+// (A streaming runJson variant was tried and measured: per-value JSON.stringify costs more than one big
+// JSON.stringify, so the driver keeps the plain object + stringify form.)
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,7 +11,10 @@ import { setFlagsFromString } from 'node:v8';
 
 // V8's incremental marking off, set before solve.js is imported so all of its work runs under it (the rules: the house
 // baseline runs with --no-incremental-marking, and an entry may tune V8's flags too).
-setFlagsFromString('--no-incremental-marking');
+// --no-opt also off: the harness runs each entry once per fresh process, so TurboFan's optimizing-compile cost
+// (measured locally: ~180 ms of compiler CPU on the practice set) exceeds what its optimized code saves on a
+// single run; Maglev/baseline JIT carries the work faster overall.
+setFlagsFromString('--no-incremental-marking --no-opt');
 
 /** solve.js, imported by its URL (a .js module carries no types) and typed by its contract. */
 const { run } = (await import(new URL('./solve.js', import.meta.url).href)) as { run: (input: unknown) => unknown };
